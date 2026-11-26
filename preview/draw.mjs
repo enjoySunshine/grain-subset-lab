@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import { openSync } from "../src/node.js";
+import * as fontkit from 'fontkit';
 
-const font = openSync(new URL("../test/data/OpenSans/OpenSans-Regular.ttf", import.meta.url));
+const font = fontkit.openSync(new URL("../test/data/OpenSans/OpenSans-Regular.ttf", import.meta.url));
 const glyph = font.glyphForCodePoint(0x41);
 const d = glyph.path.toSVG();
 const box = glyph.path.bbox;

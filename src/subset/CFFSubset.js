@@ -1,7 +1,10 @@
 import Subset from './Subset';
 import CFFTop from '../cff/CFFTop';
 import CFFPrivateDict from '../cff/CFFPrivateDict';
+import collectCFFSubrReferences from '../cff/CFFSubrReferences';
 import standardStrings from '../cff/CFFStandardStrings';
+
+const RETURN_SUBR = new Uint8Array([11]);
 
 export default class CFFSubset extends Subset {
   constructor(font) {
@@ -11,21 +14,41 @@ export default class CFFSubset extends Subset {
     if (!this.cff) {
       throw new Error('Not a CFF Font');
     }
+
+    this.glyphFDs = [];
+    this.localSubrUsage = {};
+    this.subrUsageByFD = {};
   }
 
   subsetCharstrings() {
     this.charstrings = [];
-    let gsubrs = {};
+    this.glyphFDs = [];
+    this.globalSubrUsage = {};
+    this.localSubrUsage = {};
+    this.subrUsageByFD = {};
+    let gsubrs = this.globalSubrUsage;
 
     for (let gid of this.glyphs) {
       this.charstrings.push(this.cff.getCharString(gid));
 
-      let glyph = this.font.getGlyph(gid);
-      let path = glyph.path;
+      // One charstring walk discovers both local and global subroutine refs.
+      // Local refs are aggregated immediately by FD, avoiding a second outline
+      // walk in subsetFontdict and per-glyph usage objects.
+      let fd = this.cff.fdForGlyph(gid);
+      this.glyphFDs.push(fd);
 
-      for (let subr in glyph._usedGsubrs) {
-        gsubrs[subr] = true;
+      let usedSubrs;
+      if (fd == null) {
+        usedSubrs = this.localSubrUsage;
+      } else {
+        usedSubrs = this.subrUsageByFD[fd] || {};
+        this.subrUsageByFD[fd] = usedSubrs;
       }
+
+      collectCFFSubrReferences(this.cff, gid, {
+        usedSubrs,
+        usedGlobalSubrs: gsubrs,
+      });
     }
 
     this.gsubrs = this.subsetSubrs(this.cff.globalSubrIndex, gsubrs);
@@ -39,7 +62,9 @@ export default class CFFSubset extends Subset {
         this.cff.stream.pos = subr.offset;
         res.push(this.cff.stream.readBuffer(subr.length));
       } else {
-        res.push(new Uint8Array([11])); // return
+        // Every unused slot still exists. Sharing the return byte is safe;
+        // the INDEX offsets preserve this subroutine's original call number.
+        res.push(RETURN_SUBR);
       }
     }
 
@@ -53,29 +78,21 @@ export default class CFFSubset extends Subset {
       fds: [],
     };
 
-    let used_fds = {};
     let used_subrs = [];
     let fd_select = {};
-    for (let gid of this.glyphs) {
-      let fd = this.cff.fdForGlyph(gid);
+    for (let i = 0; i < this.glyphs.length; i++) {
+      let fd = this.glyphFDs[i];
       if (fd == null) {
         continue;
       }
 
-      if (!used_fds[fd]) {
+      if (fd_select[fd] == null) {
+        fd_select[fd] = topDict.FDArray.length;
         topDict.FDArray.push(Object.assign({}, this.cff.topDict.FDArray[fd]));
-        used_subrs.push({});
-        fd_select[fd] = topDict.FDArray.length - 1;
+        used_subrs.push(this.subrUsageByFD[fd] || {});
       }
 
-      used_fds[fd] = true;
       topDict.FDSelect.fds.push(fd_select[fd]);
-
-      let glyph = this.font.getGlyph(gid);
-      let path = glyph.path;
-      for (let subr in glyph._usedSubrs) {
-        used_subrs[fd_select[fd]][subr] = true;
-      }
     }
 
     for (let i = 0; i < topDict.FDArray.length; i++) {
@@ -94,15 +111,7 @@ export default class CFFSubset extends Subset {
   }
 
   createCIDFontdict(topDict) {
-    let used_subrs = {};
-    for (let gid of this.glyphs) {
-      let glyph = this.font.getGlyph(gid);
-      let path = glyph.path;
-
-      for (let subr in glyph._usedSubrs) {
-        used_subrs[subr] = true;
-      }
-    }
+    let used_subrs = this.localSubrUsage;
 
     let privateDict = Object.assign({}, this.cff.topDict.Private);
     if (this.cff.topDict.Private && this.cff.topDict.Private.Subrs) {
